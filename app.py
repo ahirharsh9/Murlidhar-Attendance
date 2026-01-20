@@ -4,18 +4,19 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, date
 import plotly.express as px
-import urllib.parse  # For URL encoding
+import urllib.parse
+from fpdf import FPDF
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Murlidhar Attendance", layout="wide")
+st.set_page_config(page_title="Murlidhar Academy", layout="wide")
 
 # --- SESSION STATE ---
-if 'submitted' not in st.session_state:
-    st.session_state.submitted = False
-if 'absent_list' not in st.session_state:
-    st.session_state.absent_list = []
-if 'msg_details' not in st.session_state:
-    st.session_state.msg_details = {}
+if 'submitted' not in st.session_state: st.session_state.submitted = False
+if 'absent_list' not in st.session_state: st.session_state.absent_list = []
+if 'msg_details' not in st.session_state: st.session_state.msg_details = {}
+# Fee Receipt State
+if 'fee_submitted' not in st.session_state: st.session_state.fee_submitted = False
+if 'last_receipt' not in st.session_state: st.session_state.last_receipt = {}
 
 # --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource
@@ -32,14 +33,16 @@ try:
     worksheet_students = sh.worksheet("Students")
     worksheet_attendance = sh.worksheet("Attendance_Log")
     worksheet_leave = sh.worksheet("Leave_Log")
-    worksheet_batches = sh.worksheet("Batches") 
+    worksheet_batches = sh.worksheet("Batches")
+    worksheet_fees = sh.worksheet("Fees_Log") # NEW SHEET
 except Exception as e:
     st.error(f"Connection Error: {e}")
     st.stop()
 
 # --- SIDEBAR MENU ---
 st.sidebar.title("Murlidhar Academy")
-menu = st.sidebar.radio("Go to", ["Mark Attendance", "Student Analysis", "Manage Students (Admin)", "Add Leave Note"])
+# Added "Fees Management"
+menu = st.sidebar.radio("Go to", ["Mark Attendance", "Fees Management", "Student Analysis", "Download Reports", "Manage Students (Admin)", "Add Leave Note"])
 
 # --- FUNCTION: LOAD DATA ---
 def load_data():
@@ -47,20 +50,33 @@ def load_data():
     students = pd.DataFrame(worksheet_students.get_all_records())
     leaves = pd.DataFrame(worksheet_leave.get_all_records())
     batches = pd.DataFrame(worksheet_batches.get_all_records())
+    # Fees Data loading is separate/direct to avoid heavy load issues
     return students, leaves, batches
 
-# --- HELPER: GET BATCH LIST ---
 def get_batch_list():
     _, _, batches_df = load_data()
-    if batches_df.empty:
-        return ["Morning", "Evening"]
+    if batches_df.empty: return ["Morning", "Evening"]
     return batches_df['Batch_Name'].tolist()
+
+# --- PDF GENERATOR CLASS ---
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 16)
+        self.cell(0, 10, 'Murlidhar Academy', 0, 1, 'C')
+        self.set_font('Arial', 'I', 10)
+        self.cell(0, 10, 'Excellence in Education | Junagadh', 0, 1, 'C')
+        self.line(10, 30, 200, 30)
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, 'Thank you for the payment.', 0, 0, 'C')
 
 # --- 1. MARK ATTENDANCE PAGE ---
 if menu == "Mark Attendance":
     st.header("📝 Daily Attendance Marking")
     
-    # Reset Button
     if st.session_state.submitted:
         if st.button("🔄 Start New Attendance"):
             st.session_state.submitted = False
@@ -68,26 +84,19 @@ if menu == "Mark Attendance":
             st.rerun()
     
     if not st.session_state.submitted:
-        # --- ATTENDANCE FORM ---
         batch_options = get_batch_list()
         batch_options.insert(0, "All")
-
         col1, col2 = st.columns(2)
-        with col1:
-            selected_date = st.date_input("Select Date", date.today())
-        with col2:
-            selected_batch = st.selectbox("Select Batch", batch_options)
-
+        with col1: selected_date = st.date_input("Select Date", date.today())
+        with col2: selected_batch = st.selectbox("Select Batch", batch_options)
         students_df, leaves_df, _ = load_data()
 
         if selected_batch != "All" and not students_df.empty:
             students_df = students_df[students_df['Batch'] == selected_batch]
 
-        if students_df.empty:
-            st.warning("No students found.")
+        if students_df.empty: st.warning("No students found.")
         else:
             students_df['Status'] = "Present"
-            
             if not leaves_df.empty:
                 for index, row in students_df.iterrows():
                     sid = row['Student_ID']
@@ -96,36 +105,23 @@ if menu == "Mark Attendance":
                         try:
                             s_date = datetime.strptime(str(leave['Start_Date']), "%Y-%m-%d").date()
                             e_date = datetime.strptime(str(leave['End_Date']), "%Y-%m-%d").date()
-                            if s_date <= selected_date <= e_date:
-                                students_df.at[index, 'Status'] = "On Leave"
+                            if s_date <= selected_date <= e_date: students_df.at[index, 'Status'] = "On Leave"
                         except: pass
             
             st.info("Uncheck box to mark Absent.")
-            
             students_df['Present'] = students_df['Status'].apply(lambda x: True if x == 'Present' else False)
-            
-            edited_df = st.data_editor(
-                students_df[['Student_ID', 'Name', 'Present', 'Status']],
-                column_config={
-                    "Present": st.column_config.CheckboxColumn("Present?", default=True),
-                    "Status": st.column_config.TextColumn("Status", disabled=True),
-                    "Student_ID": st.column_config.NumberColumn("ID", disabled=True)
-                },
-                hide_index=True,
-                use_container_width=True
-            )
+            edited_df = st.data_editor(students_df[['Student_ID', 'Name', 'Present', 'Status']], 
+                column_config={"Present": st.column_config.CheckboxColumn("Present?", default=True), "Status": st.column_config.TextColumn("Status", disabled=True), "Student_ID": st.column_config.NumberColumn("ID", disabled=True)}, 
+                hide_index=True, use_container_width=True)
 
             st.divider()
             c1, c2 = st.columns(2)
-            with c1:
-                subject = st.text_input("Subject", placeholder="e.g. Maths")
-            with c2:
-                topic = st.text_input("Topic Name", placeholder="e.g. Chapter 1")
+            with c1: subject = st.text_input("Subject", placeholder="e.g. Maths")
+            with c2: topic = st.text_input("Topic Name", placeholder="e.g. Chapter 1")
 
             if st.button("Submit Attendance", type="primary"):
                 records_to_save = []
                 absent_list = []
-                
                 for index, row in edited_df.iterrows():
                     final_status = ""
                     if row['Present']: final_status = "Present"
@@ -133,87 +129,162 @@ if menu == "Mark Attendance":
                     else:
                         final_status = "Absent"
                         orig_row = students_df[students_df['Student_ID'] == row['Student_ID']].iloc[0]
-                        absent_list.append({
-                            "Name": row['Name'],
-                            "Student_Mobile": orig_row['Student_Mobile'],
-                            "Parent_Mobile": orig_row['Parent_Mobile']
-                        })
-
-                    records_to_save.append([
-                        str(selected_date),
-                        datetime.now().strftime("%H:%M:%S"),
-                        int(row['Student_ID']),
-                        row['Name'],
-                        final_status,
-                        subject,
-                        topic
-                    ])
+                        absent_list.append({"Name": row['Name'], "Student_Mobile": orig_row['Student_Mobile'], "Parent_Mobile": orig_row['Parent_Mobile']})
+                    records_to_save.append([str(selected_date), datetime.now().strftime("%H:%M:%S"), int(row['Student_ID']), row['Name'], final_status, subject, topic])
                 
                 worksheet_attendance.append_rows(records_to_save)
-                
-                # Session State Update
                 st.session_state.submitted = True
                 st.session_state.absent_list = absent_list
                 st.session_state.msg_details = {"subject": subject, "topic": topic}
                 st.rerun()
-
-    # --- POST SUBMISSION SCREEN ---
     else:
-        st.success("✅ Attendance Submitted Successfully!")
-        
+        st.success("✅ Attendance Submitted!")
         absent_list = st.session_state.absent_list
         details = st.session_state.msg_details
-        
         if absent_list:
             st.divider()
             st.subheader("📲 WhatsApp Actions")
-            
-            # Options
             col_opt1, col_opt2 = st.columns(2)
-            with col_opt1:
-                msg_target = st.radio("Send Message To:", ["Student", "Parents"], horizontal=True)
-            with col_opt2:
-                # NEW FEATURE: Custom Message Toggle
-                use_custom_msg = st.checkbox("✍️ Write Custom Message?")
+            with col_opt1: msg_target = st.radio("Send To:", ["Student", "Parents"], horizontal=True)
+            with col_opt2: use_custom_msg = st.checkbox("✍️ Write Custom Message?")
             
-            # Logic for Message Text
-            if use_custom_msg:
-                st.info("Tip: Use **{name}** where you want the student's name to appear.")
-                custom_text = st.text_area("Enter your message:", value="Hi {name}, ")
+            if use_custom_msg: custom_text = st.text_area("Message:", value="Hi {name}, ")
             
-            st.write("---")
-            st.write(f"**Click buttons below to send message:**")
-            
-            # Button Loop
             for student in absent_list:
                 name = student['Name']
-                
-                # Number Selection
-                if msg_target == "Student":
-                    number = student['Student_Mobile']
+                number = student['Student_Mobile'] if msg_target == "Student" else student['Parent_Mobile']
+                if use_custom_msg: final_msg = custom_text.replace("{name}", name)
                 else:
-                    number = student['Parent_Mobile']
-                
-                # Message Generation
-                if use_custom_msg:
-                    # Custom Message Logic
-                    final_msg = custom_text.replace("{name}", name)
-                else:
-                    # Default Message Logic
-                    if msg_target == "Student":
-                        final_msg = f"Hi {name}, you were absent in {details['subject']} class. Topic: {details['topic']}."
-                    else:
-                        final_msg = f"Namaste, {name} is absent today in Murlidhar Academy. Topic missed: {details['topic']}."
-                
-                # Encode URL for WhatsApp
-                encoded_msg = urllib.parse.quote(final_msg)
-                url = f"https://wa.me/{number}?text={encoded_msg}"
-                
+                    if msg_target == "Student": final_msg = f"Hi {name}, you were absent in {details['subject']}. Topic: {details['topic']}."
+                    else: final_msg = f"Namaste, {name} is absent today in Murlidhar Academy. Topic missed: {details['topic']}."
+                url = f"https://wa.me/{number}?text={urllib.parse.quote(final_msg)}"
                 st.link_button(f"Message {name} 🟢", url)
-        else:
-            st.info("No absent students today. Good job!")
 
-# --- 2. STUDENT ANALYSIS PAGE ---
+# --- 2. FEES MANAGEMENT (NEW FEATURE) ---
+elif menu == "Fees Management":
+    st.header("💰 Fees Management")
+    
+    # Reset Logic
+    if st.session_state.fee_submitted:
+        if st.button("🔄 Add Another Fee"):
+            st.session_state.fee_submitted = False
+            st.session_state.last_receipt = {}
+            st.rerun()
+
+    if not st.session_state.fee_submitted:
+        students_df, _, _ = load_data()
+        
+        if students_df.empty:
+            st.warning("No students available.")
+        else:
+            with st.form("fee_form", clear_on_submit=False):
+                # Student Selection
+                st.subheader("Payment Details")
+                s_name = st.selectbox("Select Student", students_df['Name'].unique())
+                
+                col1, col2 = st.columns(2)
+                with col1: fee_date = st.date_input("Date", date.today())
+                with col2: amount = st.number_input("Amount (₹)", min_value=1, step=100)
+                
+                col3, col4 = st.columns(2)
+                with col3: mode = st.selectbox("Payment Mode", ["Cash", "UPI", "Bank Transfer", "Cheque"])
+                with col4: status = st.selectbox("Status", ["Fees Complete", "Partial Payment", "Pending"])
+                
+                remarks = st.text_input("Remarks / Note", placeholder="e.g., January Month Fees")
+                
+                if st.form_submit_button("Submit Fee & Generate Receipt", type="primary"):
+                    # Get Student Info
+                    s_data = students_df[students_df['Name'] == s_name].iloc[0]
+                    sid = int(s_data['Student_ID'])
+                    s_mob = s_data['Student_Mobile']
+                    p_mob = s_data['Parent_Mobile']
+                    
+                    # Generate Receipt No (Random or Time based)
+                    receipt_no = f"REC-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    
+                    # Save to Google Sheet
+                    worksheet_fees.append_row([
+                        receipt_no, str(fee_date), sid, s_name, amount, mode, status, remarks
+                    ])
+                    
+                    # Save to Session for Next Screen
+                    st.session_state.fee_submitted = True
+                    st.session_state.last_receipt = {
+                        "name": s_name, "amount": amount, "date": str(fee_date),
+                        "mode": mode, "status": status, "no": receipt_no,
+                        "s_mob": s_mob, "p_mob": p_mob
+                    }
+                    st.rerun()
+
+    # --- RECEIPT SCREEN ---
+    else:
+        receipt = st.session_state.last_receipt
+        st.success("✅ Fee Saved Successfully!")
+        
+        c1, c2 = st.columns([1, 1])
+        
+        # 1. Generate PDF Logic
+        pdf = PDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        
+        # Receipt Box
+        pdf.set_fill_color(240, 240, 240)
+        pdf.rect(10, 45, 190, 80, 'F')
+        
+        pdf.ln(10)
+        pdf.cell(0, 10, f"Receipt No: {receipt['no']}", 0, 1, 'R')
+        pdf.cell(0, 10, f"Date: {receipt['date']}", 0, 1, 'R')
+        
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Student Name:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, receipt['name'], 0, 1)
+        
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Amount Paid:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, f"Rs. {receipt['amount']}/-", 0, 1)
+        
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Payment Mode:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, receipt['mode'], 0, 1)
+        
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Status:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, receipt['status'], 0, 1)
+        
+        pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
+        
+        # Display
+        with c1:
+            st.info("📄 **Step 1: Download Receipt**")
+            st.download_button(
+                label="Download PDF Receipt",
+                data=pdf_bytes,
+                file_name=f"Receipt_{receipt['name']}_{receipt['date']}.pdf",
+                mime="application/pdf"
+            )
+            
+        with c2:
+            st.info("📲 **Step 2: Notify Student**")
+            
+            # Text Message for WhatsApp
+            wa_msg = f"*Murlidhar Academy Fee Receipt*\n\nName: {receipt['name']}\nAmount: ₹{receipt['amount']}\nDate: {receipt['date']}\nMode: {receipt['mode']}\nStatus: {receipt['status']}\n\nThank you!"
+            enc_wa_msg = urllib.parse.quote(wa_msg)
+            
+            # Send to Student
+            url_s = f"https://wa.me/{receipt['s_mob']}?text={enc_wa_msg}"
+            st.link_button(f"Send Text Receipt to {receipt['name']}", url_s)
+            
+            # Send to Parent
+            url_p = f"https://wa.me/{receipt['p_mob']}?text={enc_wa_msg}"
+            st.link_button("Send Text Receipt to Parent", url_p)
+
+# --- 3. STUDENT ANALYSIS PAGE ---
 elif menu == "Student Analysis":
     st.header("📊 Student Report")
     students_df, _, _ = load_data()
@@ -221,124 +292,143 @@ elif menu == "Student Analysis":
     
     if not students_df.empty:
         s_name = st.selectbox("Select Student", students_df['Name'].unique())
-        
-        # Get Student Details for Messaging
         s_details = students_df[students_df['Name'] == s_name].iloc[0]
         
-        # --- NEW: DIRECT MESSAGE SECTION ---
-        with st.expander("💬 Send WhatsApp Message to this Student"):
+        with st.expander("💬 WhatsApp Message"):
             msg_to = st.radio("To:", ["Student", "Parent"], horizontal=True, key="anl_rad")
             custom_msg_anl = st.text_area("Message:", value=f"Hi {s_name}, ")
-            
-            if msg_to == "Student":
-                num = s_details['Student_Mobile']
-            else:
-                num = s_details['Parent_Mobile']
-                
-            if st.button("Open WhatsApp"):
-                enc_msg = urllib.parse.quote(custom_msg_anl)
-                # Streamlit doesn't support direct open in button callback easily, so we use link
-                st.write(f"Click here: [Open WhatsApp](https://wa.me/{num}?text={enc_msg})")
+            num = s_details['Student_Mobile'] if msg_to == "Student" else s_details['Parent_Mobile']
+            st.link_button("Open WhatsApp", f"https://wa.me/{num}?text={urllib.parse.quote(custom_msg_anl)}")
 
-        # Charts Logic
         if not all_attendance.empty:
             student_data = all_attendance[all_attendance['Name'] == s_name]
             if not student_data.empty:
                 total = len(student_data)
                 present = len(student_data[student_data['Status'] == 'Present'])
-                
                 c1, c2 = st.columns(2)
                 c1.metric("Total Classes", total)
                 c2.metric("Attendance %", f"{round((present/total)*100, 1)}%")
-                
                 fig = px.pie(values=[present, total-present], names=['Present', 'Absent/Leave'], 
                              title=f"Attendance: {s_name}", color_discrete_sequence=['green', 'red'])
                 st.plotly_chart(fig)
-            else:
-                st.warning("No attendance records found.")
-    else:
-        st.info("No students found.")
+            else: st.warning("No records found.")
+    else: st.info("No students found.")
 
-# --- 3. MANAGE STUDENTS & BATCHES ---
+# --- 4. DOWNLOAD REPORTS ---
+elif menu == "Download Reports":
+    st.header("📥 Download Attendance Reports")
+    all_attendance = pd.DataFrame(worksheet_attendance.get_all_records())
+    students_df, _, _ = load_data()
+    
+    if all_attendance.empty: st.warning("No data available.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1: start_date = st.date_input("From", date.today().replace(day=1))
+        with c2: end_date = st.date_input("To", date.today())
+        with c3: selected_student = st.selectbox("Select Student", ["All Students"] + students_df['Name'].tolist())
+
+        if st.button("Generate PDF", type="primary"):
+            all_attendance['Date_Obj'] = pd.to_datetime(all_attendance['Date'], format='%Y-%m-%d', errors='coerce').dt.date
+            mask = (all_attendance['Date_Obj'] >= start_date) & (all_attendance['Date_Obj'] <= end_date)
+            filtered_df = all_attendance.loc[mask]
+            
+            if selected_student != "All Students":
+                filtered_df = filtered_df[filtered_df['Name'] == selected_student]
+            
+            if filtered_df.empty: st.error("No records found.")
+            else:
+                pdf = PDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=12)
+                pdf.cell(200, 10, txt=f"Attendance Report: {start_date} to {end_date}", ln=True, align='C')
+                pdf.ln(10)
+                pdf.set_fill_color(200, 220, 255)
+                pdf.set_font("Arial", 'B', 10)
+                for h in ["Date", "Name", "Status", "Subject", "Topic"]: pdf.cell(38, 10, h, 1, 0, 'C', 1)
+                pdf.ln()
+                pdf.set_font("Arial", size=10)
+                for _, row in filtered_df.iterrows():
+                    s = str(row.get('Status', ''))
+                    pdf.set_text_color(255, 0, 0) if s == 'Absent' else pdf.set_text_color(0, 0, 0)
+                    pdf.cell(38, 10, str(row.get('Date', '')), 1, 0, 'C')
+                    pdf.cell(38, 10, str(row.get('Name', '')), 1, 0, 'L')
+                    pdf.cell(38, 10, s, 1, 0, 'C')
+                    pdf.set_text_color(0, 0, 0)
+                    pdf.cell(38, 10, str(row.get('Subject', '')), 1, 0, 'L')
+                    pdf.cell(38, 10, str(row.get('Topic', '')), 1, 1, 'L')
+                
+                st.download_button("Download PDF", pdf.output(dest='S').encode('latin-1', 'ignore'), f"Report.pdf", "application/pdf")
+
+# --- 5. ADMIN PANEL ---
 elif menu == "Manage Students (Admin)":
     st.header("🛠️ Admin Panel")
-    tab1, tab2, tab3, tab4 = st.tabs(["Add Student", "Edit Student", "Delete Student", "Manage Batches"])
-    
+    t1, t2, t3, t4 = st.tabs(["Add", "Edit", "Delete", "Batches"])
     batch_list = get_batch_list()
 
-    with tab1:
-        st.subheader("Add New Student")
-        with st.form("add_student_form", clear_on_submit=True):
-            new_id = st.number_input("Student ID / Roll No", min_value=1, step=1, format="%d")
-            new_name = st.text_input("Full Name")
-            new_batch = st.selectbox("Batch", batch_list)
-            s_mobile = st.text_input("Student Mobile", value="91")
-            p_mobile = st.text_input("Parent Mobile", value="91")
-            
-            if st.form_submit_button("Add Student"):
-                students_df, _, _ = load_data()
-                if not students_df.empty and new_id in students_df['Student_ID'].values:
-                    st.error("⚠️ ID already exists!")
+    with t1:
+        with st.form("add_form", clear_on_submit=False):
+            nid = st.number_input("ID", min_value=1, step=1, key="ai")
+            nnm = st.text_input("Name", key="an")
+            nb = st.selectbox("Batch", batch_list, key="ab")
+            nsm = st.text_input("S. Mobile", value="91", key="asm")
+            npm = st.text_input("P. Mobile", value="91", key="apm")
+            if st.form_submit_button("Add"):
+                df, _, _ = load_data()
+                if not df.empty and nid in df['Student_ID'].values: st.error("ID Exists!")
+                elif nnm == "": st.error("Name Required")
                 else:
-                    worksheet_students.append_row([int(new_id), new_name, new_batch, s_mobile, p_mobile])
-                    st.success(f"✅ {new_name} added!")
+                    worksheet_students.append_row([int(nid), nnm, nb, nsm, npm])
+                    st.success("Added!")
+                    st.session_state.an = ""
+                    st.session_state.ai = nid + 1
                     st.rerun()
-
-    with tab2:
-        st.subheader("Edit Student")
-        students_df, _, _ = load_data()
-        if not students_df.empty:
-            edit_name = st.selectbox("Select Student", students_df['Name'].tolist())
-            curr = students_df[students_df['Name'] == edit_name].iloc[0]
-            with st.form("edit_form"):
-                st.write(f"ID: {curr['Student_ID']}")
-                n_name = st.text_input("Name", value=curr['Name'])
-                try: b_index = batch_list.index(curr['Batch'])
-                except: b_index = 0
-                n_batch = st.selectbox("Batch", batch_list, index=b_index)
-                n_smob = st.text_input("Student Mobile", value=str(curr['Student_Mobile']))
-                n_pmob = st.text_input("Parent Mobile", value=str(curr['Parent_Mobile']))
+    with t2:
+        df, _, _ = load_data()
+        if not df.empty:
+            enm = st.selectbox("Select", df['Name'].tolist())
+            cur = df[df['Name'] == enm].iloc[0]
+            with st.form("edit"):
+                nn = st.text_input("Name", value=cur['Name'])
+                try: bi = batch_list.index(cur['Batch'])
+                except: bi = 0
+                nb = st.selectbox("Batch", batch_list, index=bi)
+                ns = st.text_input("S. Mob", value=str(cur['Student_Mobile']))
+                np = st.text_input("P. Mob", value=str(cur['Parent_Mobile']))
                 if st.form_submit_button("Update"):
-                    cell = worksheet_students.find(str(curr['Student_ID']))
-                    worksheet_students.update(f"B{cell.row}:E{cell.row}", [[n_name, n_batch, n_smob, n_pmob]])
+                    c = worksheet_students.find(str(cur['Student_ID']))
+                    worksheet_students.update(f"B{c.row}:E{c.row}", [[nn, nb, ns, np]])
                     st.success("Updated!")
                     st.rerun()
-
-    with tab3:
-        st.subheader("Delete Student")
-        students_df, _, _ = load_data()
-        if not students_df.empty:
-            del_name = st.selectbox("Select Student", students_df['Name'].tolist(), key="del")
+    with t3:
+        df, _, _ = load_data()
+        if not df.empty:
+            dn = st.selectbox("Delete Student", df['Name'].tolist())
             if st.button("DELETE", type="primary"):
-                sid = students_df[students_df['Name'] == del_name]['Student_ID'].values[0]
-                cell = worksheet_students.find(str(sid))
-                worksheet_students.delete_rows(cell.row)
+                sid = df[df['Name'] == dn]['Student_ID'].values[0]
+                c = worksheet_students.find(str(sid))
+                worksheet_students.delete_rows(c.row)
                 st.success("Deleted!")
                 st.rerun()
+    with t4:
+        with st.form("nbatch"):
+            bn = st.text_input("New Batch")
+            if st.form_submit_button("Create"):
+                worksheet_batches.append_row([bn])
+                st.success("Created!")
+                st.rerun()
 
-    with tab4:
-        st.subheader("Manage Batches")
-        st.write("Current Batches:", ", ".join(batch_list))
-        with st.form("add_batch"):
-            new_b_name = st.text_input("New Batch Name")
-            if st.form_submit_button("Create Batch"):
-                if new_b_name:
-                    worksheet_batches.append_row([new_b_name])
-                    st.success("Batch created!")
-                    st.rerun()
-
-# --- 4. ADD LEAVE PAGE ---
+# --- 6. LEAVE NOTE ---
 elif menu == "Add Leave Note":
-    st.header("🗓️ Add Leave Note")
-    students_df, _, _ = load_data()
-    if not students_df.empty:
-        with st.form("leave_form"):
-            s_name = st.selectbox("Student Name", students_df['Name'].unique())
+    st.header("🗓️ Leave Note")
+    df, _, _ = load_data()
+    if not df.empty:
+        with st.form("leave"):
+            sn = st.selectbox("Student", df['Name'].unique())
             c1, c2 = st.columns(2)
-            start_d = c1.date_input("From")
-            end_d = c2.date_input("To")
-            reason = st.text_input("Reason")
-            if st.form_submit_button("Save Leave"):
-                sid = students_df[students_df['Name'] == s_name]['Student_ID'].values[0]
-                worksheet_leave.append_row([int(sid), s_name, str(start_d), str(end_d), reason])
-                st.success("Leave Added!")
+            d1 = c1.date_input("From")
+            d2 = c2.date_input("To")
+            r = st.text_input("Reason")
+            if st.form_submit_button("Save"):
+                sid = df[df['Name'] == sn]['Student_ID'].values[0]
+                worksheet_leave.append_row([int(sid), sn, str(d1), str(d2), r])
+                st.success("Saved!")

@@ -6,7 +6,6 @@ from datetime import datetime, date
 import plotly.express as px
 import urllib.parse
 from fpdf import FPDF
-import time # Sleep mate
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Murlidhar Academy", layout="wide")
@@ -15,6 +14,7 @@ st.set_page_config(page_title="Murlidhar Academy", layout="wide")
 if 'submitted' not in st.session_state: st.session_state.submitted = False
 if 'absent_list' not in st.session_state: st.session_state.absent_list = []
 if 'msg_details' not in st.session_state: st.session_state.msg_details = {}
+# Fee Receipt State
 if 'fee_submitted' not in st.session_state: st.session_state.fee_submitted = False
 if 'last_receipt' not in st.session_state: st.session_state.last_receipt = {}
 
@@ -43,25 +43,13 @@ except Exception as e:
 st.sidebar.title("Murlidhar Academy")
 menu = st.sidebar.radio("Go to", ["Mark Attendance", "Fees Management", "Student Analysis", "Download Reports", "Manage Students (Admin)", "Add Leave Note"])
 
-# --- OPTIMIZED DATA LOADING (IMPORTANT FIX) ---
-# ttl=60 no arth: Data 60 second sudhi cache ma rehse, google pase thi vaarambaar nahi mange
-@st.cache_data(ttl=60)
-def load_data_cached():
-    try:
-        s_data = worksheet_students.get_all_records()
-        l_data = worksheet_leave.get_all_records()
-        b_data = worksheet_batches.get_all_records()
-        return pd.DataFrame(s_data), pd.DataFrame(l_data), pd.DataFrame(b_data)
-    except Exception as e:
-        st.error("API Limit Hit. Waiting for 10 seconds...")
-        time.sleep(10) # Wait and retry logic
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
+# --- FUNCTION: LOAD DATA ---
 def load_data():
-    return load_data_cached()
-
-def clear_cache():
     st.cache_data.clear()
+    students = pd.DataFrame(worksheet_students.get_all_records())
+    leaves = pd.DataFrame(worksheet_leave.get_all_records())
+    batches = pd.DataFrame(worksheet_batches.get_all_records())
+    return students, leaves, batches
 
 def get_batch_list():
     _, _, batches_df = load_data()
@@ -74,13 +62,14 @@ class PDF(FPDF):
         self.set_font('Arial', 'B', 16)
         self.cell(0, 10, 'Murlidhar Academy', 0, 1, 'C')
         self.set_font('Arial', 'I', 10)
-        self.cell(0, 10, 'Excellence in Education | Junagadh', 0, 1, 'C')
+        self.cell(0, 10, 'Attendance & Fees Report', 0, 1, 'C')
         self.line(10, 30, 200, 30)
         self.ln(10)
+
     def footer(self):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, 'Thank you for the payment.', 0, 0, 'C')
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 # --- 1. MARK ATTENDANCE PAGE ---
 if menu == "Mark Attendance":
@@ -98,7 +87,6 @@ if menu == "Mark Attendance":
         col1, col2 = st.columns(2)
         with col1: selected_date = st.date_input("Select Date", date.today())
         with col2: selected_batch = st.selectbox("Select Batch", batch_options)
-        
         students_df, leaves_df, _ = load_data()
 
         if selected_batch != "All" and not students_df.empty:
@@ -143,7 +131,6 @@ if menu == "Mark Attendance":
                     records_to_save.append([str(selected_date), datetime.now().strftime("%H:%M:%S"), int(row['Student_ID']), row['Name'], final_status, subject, topic])
                 
                 worksheet_attendance.append_rows(records_to_save)
-                # Cache clear is NOT needed here as we are not reading attendance immediately
                 st.session_state.submitted = True
                 st.session_state.absent_list = absent_list
                 st.session_state.msg_details = {"subject": subject, "topic": topic}
@@ -193,9 +180,9 @@ elif menu == "Fees Management":
                 col3, col4 = st.columns(2)
                 with col3: mode = st.selectbox("Payment Mode", ["Cash", "UPI", "Bank Transfer", "Cheque"])
                 with col4: status = st.selectbox("Status", ["Fees Complete", "Partial Payment", "Pending"])
-                remarks = st.text_input("Remarks", placeholder="e.g., January Month Fees")
+                remarks = st.text_input("Remarks", placeholder="e.g., January Fees")
                 
-                if st.form_submit_button("Submit Fee & Generate Receipt", type="primary"):
+                if st.form_submit_button("Submit Fee", type="primary"):
                     s_data = students_df[students_df['Name'] == s_name].iloc[0]
                     sid = int(s_data['Student_ID'])
                     s_mob = s_data['Student_Mobile']
@@ -203,15 +190,14 @@ elif menu == "Fees Management":
                     receipt_no = f"REC-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                     
                     worksheet_fees.append_row([receipt_no, str(fee_date), sid, s_name, amount, mode, status, remarks])
-                    
                     st.session_state.fee_submitted = True
                     st.session_state.last_receipt = {"name": s_name, "amount": amount, "date": str(fee_date), "mode": mode, "status": status, "no": receipt_no, "s_mob": s_mob, "p_mob": p_mob}
                     st.rerun()
-
     else:
         receipt = st.session_state.last_receipt
         st.success("✅ Fee Saved Successfully!")
         c1, c2 = st.columns([1, 1])
+        
         pdf = PDF()
         pdf.add_page()
         pdf.set_font("Arial", size=12)
@@ -222,34 +208,36 @@ elif menu == "Fees Management":
         pdf.cell(0, 10, f"Date: {receipt['date']}", 0, 1, 'R')
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 12)
-        fields = [("Student Name:", receipt['name']), ("Amount Paid:", f"Rs. {receipt['amount']}/-"), ("Payment Mode:", receipt['mode']), ("Status:", receipt['status'])]
-        for label, val in fields:
-            pdf.cell(50, 10, label, 0, 0)
-            pdf.set_font("Arial", '', 12)
-            pdf.cell(0, 10, val, 0, 1)
-            pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Student Name:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, receipt['name'], 0, 1)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Amount Paid:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, f"Rs. {receipt['amount']}/-", 0, 1)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(50, 10, "Payment Mode:", 0, 0)
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(0, 10, receipt['mode'], 0, 1)
         
         pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
         
         with c1:
-            st.info("📄 **Download Receipt**")
-            st.download_button("Download PDF", pdf_bytes, f"Receipt_{receipt['name']}.pdf", "application/pdf")
+            st.download_button("Download PDF Receipt", pdf_bytes, f"Receipt_{receipt['name']}.pdf", "application/pdf")
         with c2:
-            st.info("📲 **Notify Student**")
-            wa_msg = f"*Murlidhar Academy Fee Receipt*\n\nName: {receipt['name']}\nAmount: ₹{receipt['amount']}\nDate: {receipt['date']}\nMode: {receipt['mode']}\nStatus: {receipt['status']}\n\nThank you!"
-            url_s = f"https://wa.me/{receipt['s_mob']}?text={urllib.parse.quote(wa_msg)}"
-            st.link_button(f"Send to {receipt['name']}", url_s)
+            wa_msg = f"*Murlidhar Academy Receipt*\nName: {receipt['name']}\nAmount: ₹{receipt['amount']}\nDate: {receipt['date']}\nMode: {receipt['mode']}\nThank you!"
+            st.link_button(f"Message {receipt['name']}", f"https://wa.me/{receipt['s_mob']}?text={urllib.parse.quote(wa_msg)}")
 
 # --- 3. STUDENT ANALYSIS PAGE ---
 elif menu == "Student Analysis":
     st.header("📊 Student Report")
     students_df, _, _ = load_data()
-    # Analysis mate data load karvo j padse, pan cache vada function thi
     all_attendance = pd.DataFrame(worksheet_attendance.get_all_records())
     
     if not students_df.empty:
         s_name = st.selectbox("Select Student", students_df['Name'].unique())
         s_details = students_df[students_df['Name'] == s_name].iloc[0]
+        
         with st.expander("💬 WhatsApp Message"):
             msg_to = st.radio("To:", ["Student", "Parent"], horizontal=True, key="anl_rad")
             custom_msg_anl = st.text_area("Message:", value=f"Hi {s_name}, ")
@@ -264,52 +252,80 @@ elif menu == "Student Analysis":
                 c1, c2 = st.columns(2)
                 c1.metric("Total Classes", total)
                 c2.metric("Attendance %", f"{round((present/total)*100, 1)}%")
-                fig = px.pie(values=[present, total-present], names=['Present', 'Absent/Leave'], title=f"Attendance: {s_name}", color_discrete_sequence=['green', 'red'])
+                fig = px.pie(values=[present, total-present], names=['Present', 'Absent/Leave'], 
+                             title=f"Attendance: {s_name}", color_discrete_sequence=['green', 'red'])
                 st.plotly_chart(fig)
             else: st.warning("No records found.")
     else: st.info("No students found.")
 
-# --- 4. DOWNLOAD REPORTS ---
+# --- 4. DOWNLOAD REPORTS (UPDATED WITH BATCH) ---
 elif menu == "Download Reports":
-    st.header("📥 Download Reports")
+    st.header("📥 Download Attendance Reports")
+    all_attendance = pd.DataFrame(worksheet_attendance.get_all_records())
     students_df, _, _ = load_data()
-    c1, c2, c3 = st.columns(3)
-    with c1: start_date = st.date_input("From", date.today().replace(day=1))
-    with c2: end_date = st.date_input("To", date.today())
-    with c3: selected_student = st.selectbox("Select Student", ["All Students"] + students_df['Name'].tolist())
+    batch_list = get_batch_list()
+    
+    if all_attendance.empty: st.warning("No data available.")
+    else:
+        # Layout: 4 Columns
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: start_date = st.date_input("From", date.today().replace(day=1))
+        with c2: end_date = st.date_input("To", date.today())
+        
+        # Batch Filter
+        with c3: 
+            selected_batch = st.selectbox("Select Batch", ["All Batches"] + batch_list)
+        
+        # Filter Student List based on Batch
+        student_options = ["All Students"]
+        if selected_batch != "All Batches" and not students_df.empty:
+            # Only show students belonging to selected batch
+            batch_students = students_df[students_df['Batch'] == selected_batch]['Name'].tolist()
+            student_options += batch_students
+        elif not students_df.empty:
+            student_options += students_df['Name'].tolist()
+            
+        with c4: selected_student = st.selectbox("Select Student", student_options)
 
-    if st.button("Generate PDF", type="primary"):
-        # Report generate karti vakhte taajo data joiye, atle ahi direct call karishu
-        all_attendance = pd.DataFrame(worksheet_attendance.get_all_records())
-        all_attendance['Date_Obj'] = pd.to_datetime(all_attendance['Date'], format='%Y-%m-%d', errors='coerce').dt.date
-        mask = (all_attendance['Date_Obj'] >= start_date) & (all_attendance['Date_Obj'] <= end_date)
-        filtered_df = all_attendance.loc[mask]
-        
-        if selected_student != "All Students":
-            filtered_df = filtered_df[filtered_df['Name'] == selected_student]
-        
-        if filtered_df.empty: st.error("No records found.")
-        else:
-            pdf = PDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, txt=f"Attendance Report: {start_date} to {end_date}", ln=True, align='C')
-            pdf.ln(10)
-            pdf.set_fill_color(200, 220, 255)
-            pdf.set_font("Arial", 'B', 10)
-            for h in ["Date", "Name", "Status", "Subject", "Topic"]: pdf.cell(38, 10, h, 1, 0, 'C', 1)
-            pdf.ln()
-            pdf.set_font("Arial", size=10)
-            for _, row in filtered_df.iterrows():
-                s = str(row.get('Status', ''))
-                pdf.set_text_color(255, 0, 0) if s == 'Absent' else pdf.set_text_color(0, 0, 0)
-                pdf.cell(38, 10, str(row.get('Date', '')), 1, 0, 'C')
-                pdf.cell(38, 10, str(row.get('Name', '')), 1, 0, 'L')
-                pdf.cell(38, 10, s, 1, 0, 'C')
-                pdf.set_text_color(0, 0, 0)
-                pdf.cell(38, 10, str(row.get('Subject', '')), 1, 0, 'L')
-                pdf.cell(38, 10, str(row.get('Topic', '')), 1, 1, 'L')
-            st.download_button("Download PDF", pdf.output(dest='S').encode('latin-1', 'ignore'), f"Report.pdf", "application/pdf")
+        if st.button("Generate PDF", type="primary"):
+            # 1. Filter by Date
+            all_attendance['Date_Obj'] = pd.to_datetime(all_attendance['Date'], format='%Y-%m-%d', errors='coerce').dt.date
+            mask = (all_attendance['Date_Obj'] >= start_date) & (all_attendance['Date_Obj'] <= end_date)
+            filtered_df = all_attendance.loc[mask]
+            
+            # 2. Filter by Batch (Indirectly via Name)
+            if selected_batch != "All Batches":
+                # Get names of students in this batch
+                valid_names = students_df[students_df['Batch'] == selected_batch]['Name'].tolist()
+                filtered_df = filtered_df[filtered_df['Name'].isin(valid_names)]
+
+            # 3. Filter by Student
+            if selected_student != "All Students":
+                filtered_df = filtered_df[filtered_df['Name'] == selected_student]
+            
+            if filtered_df.empty: st.error(f"No records found for Batch: {selected_batch}")
+            else:
+                pdf = PDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=12)
+                pdf.cell(200, 10, txt=f"Report: {selected_batch} ({start_date} to {end_date})", ln=True, align='C')
+                pdf.ln(10)
+                pdf.set_fill_color(200, 220, 255)
+                pdf.set_font("Arial", 'B', 10)
+                for h in ["Date", "Name", "Status", "Subject", "Topic"]: pdf.cell(38, 10, h, 1, 0, 'C', 1)
+                pdf.ln()
+                pdf.set_font("Arial", size=10)
+                for _, row in filtered_df.iterrows():
+                    s = str(row.get('Status', ''))
+                    pdf.set_text_color(255, 0, 0) if s == 'Absent' else pdf.set_text_color(0, 0, 0)
+                    pdf.cell(38, 10, str(row.get('Date', '')), 1, 0, 'C')
+                    pdf.cell(38, 10, str(row.get('Name', '')), 1, 0, 'L')
+                    pdf.cell(38, 10, s, 1, 0, 'C')
+                    pdf.set_text_color(0, 0, 0)
+                    pdf.cell(38, 10, str(row.get('Subject', '')), 1, 0, 'L')
+                    pdf.cell(38, 10, str(row.get('Topic', '')), 1, 1, 'L')
+                
+                st.download_button("Download PDF", pdf.output(dest='S').encode('latin-1', 'ignore'), f"Report_{selected_batch}.pdf", "application/pdf")
 
 # --- 5. ADMIN PANEL ---
 elif menu == "Manage Students (Admin)":
@@ -330,7 +346,6 @@ elif menu == "Manage Students (Admin)":
                 elif nnm == "": st.error("Name Required")
                 else:
                     worksheet_students.append_row([int(nid), nnm, nb, nsm, npm])
-                    clear_cache() # Only clear cache when writing
                     st.success("Added!")
                     st.session_state.an = ""
                     st.session_state.ai = nid + 1
@@ -350,7 +365,6 @@ elif menu == "Manage Students (Admin)":
                 if st.form_submit_button("Update"):
                     c = worksheet_students.find(str(cur['Student_ID']))
                     worksheet_students.update(f"B{c.row}:E{c.row}", [[nn, nb, ns, np]])
-                    clear_cache()
                     st.success("Updated!")
                     st.rerun()
     with t3:
@@ -361,7 +375,6 @@ elif menu == "Manage Students (Admin)":
                 sid = df[df['Name'] == dn]['Student_ID'].values[0]
                 c = worksheet_students.find(str(sid))
                 worksheet_students.delete_rows(c.row)
-                clear_cache()
                 st.success("Deleted!")
                 st.rerun()
     with t4:
@@ -369,7 +382,6 @@ elif menu == "Manage Students (Admin)":
             bn = st.text_input("New Batch")
             if st.form_submit_button("Create"):
                 worksheet_batches.append_row([bn])
-                clear_cache()
                 st.success("Created!")
                 st.rerun()
 
@@ -387,5 +399,4 @@ elif menu == "Add Leave Note":
             if st.form_submit_button("Save"):
                 sid = df[df['Name'] == sn]['Student_ID'].values[0]
                 worksheet_leave.append_row([int(sid), sn, str(d1), str(d2), r])
-                clear_cache()
                 st.success("Saved!")

@@ -12,7 +12,6 @@ st.set_page_config(page_title="Murlidhar Attendance", layout="wide")
 @st.cache_resource
 def get_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    # Secrets mathi credentials levu (Streamlit Cloud mate)
     creds_dict = st.secrets["gcp_service_account"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
@@ -20,12 +19,14 @@ def get_connection():
 
 try:
     client = get_connection()
-    sh = client.open("Murlidhar_Attendance") # Sheet nu naam barabar hovu joye
+    sh = client.open("Murlidhar_Attendance")
     worksheet_students = sh.worksheet("Students")
     worksheet_attendance = sh.worksheet("Attendance_Log")
     worksheet_leave = sh.worksheet("Leave_Log")
+    # NEW: Batches Sheet
+    worksheet_batches = sh.worksheet("Batches") 
 except Exception as e:
-    st.error(f"Connection Error: {e}")
+    st.error(f"Connection Error or 'Batches' tab missing: {e}")
     st.stop()
 
 # --- SIDEBAR MENU ---
@@ -34,36 +35,44 @@ menu = st.sidebar.radio("Go to", ["Mark Attendance", "Student Analysis", "Manage
 
 # --- FUNCTION: LOAD DATA ---
 def load_data():
-    # Cache clear karvu jaruri che jethi nava students tarat dekhay
     st.cache_data.clear()
     students = pd.DataFrame(worksheet_students.get_all_records())
     leaves = pd.DataFrame(worksheet_leave.get_all_records())
-    return students, leaves
+    batches = pd.DataFrame(worksheet_batches.get_all_records())
+    return students, leaves, batches
+
+# --- HELPER: GET BATCH LIST ---
+def get_batch_list():
+    _, _, batches_df = load_data()
+    if batches_df.empty:
+        return ["Morning", "Evening"] # Default fallback
+    return batches_df['Batch_Name'].tolist()
 
 # --- 1. MARK ATTENDANCE PAGE ---
 if menu == "Mark Attendance":
     st.header("📝 Daily Attendance Marking")
     
+    # Get Dynamic Batches
+    batch_options = get_batch_list()
+    batch_options.insert(0, "All") # Add 'All' at the start
+
     col1, col2 = st.columns(2)
     with col1:
         selected_date = st.date_input("Select Date", date.today())
     with col2:
-        selected_batch = st.selectbox("Select Batch", ["Morning", "Evening", "All"])
+        selected_batch = st.selectbox("Select Batch", batch_options)
 
-    students_df, leaves_df = load_data()
+    students_df, leaves_df, _ = load_data()
 
-    # Filter Logic
     if selected_batch != "All" and not students_df.empty:
         students_df = students_df[students_df['Batch'] == selected_batch]
 
     if students_df.empty:
-        st.warning("No students found. Go to 'Manage Students' to add one.")
+        st.warning("No students found in this batch.")
     else:
-        # Default Settings
         students_df['Status'] = "Present"
         students_df['Is_Leave'] = False 
 
-        # Leave Logic Check (Jo vidhyarthi leave par hoy to auto-detect kare)
         if not leaves_df.empty:
             for index, row in students_df.iterrows():
                 sid = row['Student_ID']
@@ -78,9 +87,8 @@ if menu == "Mark Attendance":
                     except:
                         pass
         
-        st.info("Tip: Uncheck box to mark Absent.")
+        st.info("Uncheck box to mark Absent.")
         
-        # Prepare Data for Editor
         students_df['Present'] = students_df['Status'].apply(lambda x: True if x == 'Present' else False)
         
         edited_df = st.data_editor(
@@ -95,7 +103,6 @@ if menu == "Mark Attendance":
         )
 
         st.divider()
-        # Teacher's Log Section
         c1, c2 = st.columns(2)
         with c1:
             subject = st.selectbox("Subject", ["Maths", "Reasoning", "Polity", "History", "Geography", "English", "Gujarati"])
@@ -114,7 +121,6 @@ if menu == "Mark Attendance":
                     final_status = "On Leave"
                 else:
                     final_status = "Absent"
-                    # Get mobile numbers for WhatsApp
                     orig_row = students_df[students_df['Student_ID'] == row['Student_ID']].iloc[0]
                     absent_list.append({
                         "Name": row['Name'],
@@ -132,11 +138,9 @@ if menu == "Mark Attendance":
                     topic
                 ])
             
-            # Save to Google Sheet
             worksheet_attendance.append_rows(records_to_save)
-            st.success("✅ Attendance Saved Successfully!")
+            st.success("✅ Attendance Saved!")
             
-            # WhatsApp Integration
             if absent_list:
                 st.divider()
                 st.subheader("📲 WhatsApp Actions")
@@ -157,11 +161,11 @@ if menu == "Mark Attendance":
 # --- 2. STUDENT ANALYSIS PAGE ---
 elif menu == "Student Analysis":
     st.header("📊 Student Report")
-    students_df, _ = load_data()
+    students_df, _, _ = load_data()
     all_attendance = pd.DataFrame(worksheet_attendance.get_all_records())
     
     if all_attendance.empty:
-        st.info("No attendance records yet.")
+        st.info("No data yet.")
     else:
         if not students_df.empty:
             s_name = st.selectbox("Select Student", students_df['Name'].unique())
@@ -175,110 +179,110 @@ elif menu == "Student Analysis":
                 c1.metric("Total Classes", total)
                 c2.metric("Attendance %", f"{round((present/total)*100, 1)}%")
                 
-                # Pie Chart
                 fig = px.pie(values=[present, total-present], names=['Present', 'Absent/Leave'], 
-                             title=f"Attendance Chart: {s_name}", 
-                             color_discrete_sequence=['green', 'red'])
+                             title=f"Attendance: {s_name}", color_discrete_sequence=['green', 'red'])
                 st.plotly_chart(fig)
             else:
-                st.warning("No records found for this student.")
+                st.warning("No records found.")
 
-# --- 3. MANAGE STUDENTS (ADMIN PANEL) ---
+# --- 3. MANAGE STUDENTS & BATCHES ---
 elif menu == "Manage Students (Admin)":
-    st.header("🛠️ Manage Students")
+    st.header("🛠️ Admin Panel")
     
-    tab1, tab2, tab3 = st.tabs(["Add New Student", "Edit Student", "Delete Student"])
+    # NEW TAB: Manage Batches
+    tab1, tab2, tab3, tab4 = st.tabs(["Add Student", "Edit Student", "Delete Student", "Manage Batches"])
     
-    # -- ADD STUDENT (MANUAL ID) --
+    batch_list = get_batch_list()
+
+    # -- ADD STUDENT --
     with tab1:
         st.subheader("Add New Student")
         with st.form("add_student_form", clear_on_submit=True):
             new_id = st.number_input("Student ID / Roll No", min_value=1, step=1, format="%d")
             new_name = st.text_input("Full Name")
-            new_batch = st.selectbox("Batch", ["Morning", "Evening"])
-            s_mobile = st.text_input("Student Mobile (with 91)", value="91")
-            p_mobile = st.text_input("Parent Mobile (with 91)", value="91")
+            # Use Dynamic Batch List
+            new_batch = st.selectbox("Batch", batch_list)
+            s_mobile = st.text_input("Student Mobile", value="91")
+            p_mobile = st.text_input("Parent Mobile", value="91")
             
-            submitted = st.form_submit_button("Add Student")
-            
-            if submitted:
-                students_df, _ = load_data()
-                
-                # Check for Duplicate ID
+            if st.form_submit_button("Add Student"):
+                students_df, _, _ = load_data()
                 if not students_df.empty and new_id in students_df['Student_ID'].values:
-                    st.error(f"⚠️ Error: Student ID {new_id} already exists! Use a unique ID.")
+                    st.error("⚠️ ID already exists!")
                 else:
                     worksheet_students.append_row([int(new_id), new_name, new_batch, s_mobile, p_mobile])
-                    st.success(f"✅ {new_name} added with ID {new_id}")
+                    st.success(f"✅ {new_name} added to {new_batch}!")
                     st.rerun()
 
     # -- EDIT STUDENT --
     with tab2:
-        st.subheader("Edit Student Details")
-        students_df, _ = load_data()
-        
+        st.subheader("Edit Student")
+        students_df, _, _ = load_data()
         if not students_df.empty:
-            edit_student_name = st.selectbox("Select Student to Edit", students_df['Name'].tolist())
-            
-            # Fetch current details
-            current_data = students_df[students_df['Name'] == edit_student_name].iloc[0]
+            edit_name = st.selectbox("Select Student", students_df['Name'].tolist())
+            curr = students_df[students_df['Name'] == edit_name].iloc[0]
             
             with st.form("edit_form"):
-                st.write(f"Editing ID: {current_data['Student_ID']}") # ID cannot be changed here
-                new_name_edit = st.text_input("Name", value=current_data['Name'])
-                new_batch_edit = st.selectbox("Batch", ["Morning", "Evening"], index=0 if current_data['Batch']=="Morning" else 1)
-                new_s_mob = st.text_input("Student Mobile", value=str(current_data['Student_Mobile']))
-                new_p_mob = st.text_input("Parent Mobile", value=str(current_data['Parent_Mobile']))
+                st.write(f"ID: {curr['Student_ID']}")
+                n_name = st.text_input("Name", value=curr['Name'])
+                # Dynamic Batch List with current Index
+                try:
+                    b_index = batch_list.index(curr['Batch'])
+                except:
+                    b_index = 0
+                n_batch = st.selectbox("Batch", batch_list, index=b_index)
                 
-                update_btn = st.form_submit_button("Update Details")
+                n_smob = st.text_input("Student Mobile", value=str(curr['Student_Mobile']))
+                n_pmob = st.text_input("Parent Mobile", value=str(curr['Parent_Mobile']))
                 
-                if update_btn:
-                    try:
-                        # Find Row in Sheet
-                        cell = worksheet_students.find(str(current_data['Student_ID']))
-                        row_num = cell.row
-                        # Update Cells
-                        worksheet_students.update(f"B{row_num}:E{row_num}", [[new_name_edit, new_batch_edit, new_s_mob, new_p_mob]])
-                        st.success("✅ Updated Successfully!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Update Failed: {e}")
+                if st.form_submit_button("Update"):
+                    cell = worksheet_students.find(str(curr['Student_ID']))
+                    worksheet_students.update(f"B{cell.row}:E{cell.row}", [[n_name, n_batch, n_smob, n_pmob]])
+                    st.success("Updated!")
+                    st.rerun()
 
     # -- DELETE STUDENT --
     with tab3:
         st.subheader("Delete Student")
-        st.warning("⚠️ Warning: This will permanently delete the student from the list.")
-        
-        students_df, _ = load_data()
+        students_df, _, _ = load_data()
         if not students_df.empty:
-            del_name = st.selectbox("Select Student to Delete", students_df['Name'].tolist(), key="del_select")
-            
-            if st.button("DELETE STUDENT", type="primary"):
-                try:
-                    sid_to_del = students_df[students_df['Name'] == del_name]['Student_ID'].values[0]
-                    cell = worksheet_students.find(str(sid_to_del))
-                    worksheet_students.delete_rows(cell.row)
-                    st.success(f"🗑️ {del_name} Deleted!")
+            del_name = st.selectbox("Select Student", students_df['Name'].tolist(), key="del")
+            if st.button("DELETE", type="primary"):
+                sid = students_df[students_df['Name'] == del_name]['Student_ID'].values[0]
+                cell = worksheet_students.find(str(sid))
+                worksheet_students.delete_rows(cell.row)
+                st.success("Deleted!")
+                st.rerun()
+
+    # -- NEW: MANAGE BATCHES --
+    with tab4:
+        st.subheader("Manage Batches")
+        st.write("Current Batches:", ", ".join(batch_list))
+        
+        with st.form("add_batch"):
+            new_b_name = st.text_input("New Batch Name (e.g., GPSC-2025)")
+            if st.form_submit_button("Create Batch"):
+                if new_b_name:
+                    worksheet_batches.append_row([new_b_name])
+                    st.success(f"Batch '{new_b_name}' created!")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Delete Failed: {e}")
+                else:
+                    st.error("Please enter a name.")
 
 # --- 4. ADD LEAVE PAGE ---
 elif menu == "Add Leave Note":
     st.header("🗓️ Add Leave Note")
-    students_df, _ = load_data()
+    students_df, _, _ = load_data()
     
     if not students_df.empty:
         with st.form("leave_form"):
-            s_name = st.selectbox("Select Student", students_df['Name'].unique())
-            col1, col2 = st.columns(2)
-            start_d = col1.date_input("From Date")
-            end_d = col2.date_input("To Date")
+            s_name = st.selectbox("Student Name", students_df['Name'].unique())
+            c1, c2 = st.columns(2)
+            start_d = c1.date_input("From")
+            end_d = c2.date_input("To")
             reason = st.text_input("Reason")
             
             if st.form_submit_button("Save Leave"):
                 sid = students_df[students_df['Name'] == s_name]['Student_ID'].values[0]
                 worksheet_leave.append_row([int(sid), s_name, str(start_d), str(end_d), reason])
-                st.success("✅ Leave Added!")
-    else:
-        st.warning("Please add students first.")
+                st.success("Leave Added!")

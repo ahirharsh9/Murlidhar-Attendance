@@ -4,11 +4,12 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, date
 import plotly.express as px
+import urllib.parse  # For URL encoding
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Murlidhar Attendance", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (Refesh error fix karva mate) ---
+# --- SESSION STATE ---
 if 'submitted' not in st.session_state:
     st.session_state.submitted = False
 if 'absent_list' not in st.session_state:
@@ -59,7 +60,7 @@ def get_batch_list():
 if menu == "Mark Attendance":
     st.header("📝 Daily Attendance Marking")
     
-    # Reset button (Jo navi attendance purvi hoy)
+    # Reset Button
     if st.session_state.submitted:
         if st.button("🔄 Start New Attendance"):
             st.session_state.submitted = False
@@ -83,11 +84,10 @@ if menu == "Mark Attendance":
             students_df = students_df[students_df['Batch'] == selected_batch]
 
         if students_df.empty:
-            st.warning("No students found in this batch.")
+            st.warning("No students found.")
         else:
             students_df['Status'] = "Present"
-            students_df['Is_Leave'] = False 
-
+            
             if not leaves_df.empty:
                 for index, row in students_df.iterrows():
                     sid = row['Student_ID']
@@ -98,9 +98,7 @@ if menu == "Mark Attendance":
                             e_date = datetime.strptime(str(leave['End_Date']), "%Y-%m-%d").date()
                             if s_date <= selected_date <= e_date:
                                 students_df.at[index, 'Status'] = "On Leave"
-                                students_df.at[index, 'Is_Leave'] = True
-                        except:
-                            pass
+                        except: pass
             
             st.info("Uncheck box to mark Absent.")
             
@@ -120,10 +118,9 @@ if menu == "Mark Attendance":
             st.divider()
             c1, c2 = st.columns(2)
             with c1:
-                # FIXED: Text Input for Subject
                 subject = st.text_input("Subject", placeholder="e.g. Maths")
             with c2:
-                topic = st.text_input("Topic Name", placeholder="e.g. Bandharan Part-1")
+                topic = st.text_input("Topic Name", placeholder="e.g. Chapter 1")
 
             if st.button("Submit Attendance", type="primary"):
                 records_to_save = []
@@ -131,10 +128,8 @@ if menu == "Mark Attendance":
                 
                 for index, row in edited_df.iterrows():
                     final_status = ""
-                    if row['Present']:
-                        final_status = "Present"
-                    elif row['Status'] == "On Leave":
-                        final_status = "On Leave"
+                    if row['Present']: final_status = "Present"
+                    elif row['Status'] == "On Leave": final_status = "On Leave"
                     else:
                         final_status = "Absent"
                         orig_row = students_df[students_df['Student_ID'] == row['Student_ID']].iloc[0]
@@ -156,38 +151,67 @@ if menu == "Mark Attendance":
                 
                 worksheet_attendance.append_rows(records_to_save)
                 
-                # SAVE STATE (Aa refresh issue solve karse)
+                # Session State Update
                 st.session_state.submitted = True
                 st.session_state.absent_list = absent_list
                 st.session_state.msg_details = {"subject": subject, "topic": topic}
                 st.rerun()
 
-    # --- AFTER SUBMISSION SCREEN (CONFIRMATION) ---
+    # --- POST SUBMISSION SCREEN ---
     else:
         st.success("✅ Attendance Submitted Successfully!")
-        st.info("Have tame niche thi WhatsApp msg mokli shako cho. Paacha javu hoy to upar 'Start New' dabavo.")
         
         absent_list = st.session_state.absent_list
         details = st.session_state.msg_details
         
         if absent_list:
+            st.divider()
             st.subheader("📲 WhatsApp Actions")
-            # Have aa radio button dabavathi page refresh thase to pan data jase nahi
-            msg_target = st.radio("Send Message To:", ["Student", "Parents"], horizontal=True)
             
+            # Options
+            col_opt1, col_opt2 = st.columns(2)
+            with col_opt1:
+                msg_target = st.radio("Send Message To:", ["Student", "Parents"], horizontal=True)
+            with col_opt2:
+                # NEW FEATURE: Custom Message Toggle
+                use_custom_msg = st.checkbox("✍️ Write Custom Message?")
+            
+            # Logic for Message Text
+            if use_custom_msg:
+                st.info("Tip: Use **{name}** where you want the student's name to appear.")
+                custom_text = st.text_area("Enter your message:", value="Hi {name}, ")
+            
+            st.write("---")
+            st.write(f"**Click buttons below to send message:**")
+            
+            # Button Loop
             for student in absent_list:
                 name = student['Name']
+                
+                # Number Selection
                 if msg_target == "Student":
                     number = student['Student_Mobile']
-                    msg = f"Hi {name}, you were absent in {details['subject']} class. Topic: {details['topic']}."
                 else:
                     number = student['Parent_Mobile']
-                    msg = f"Namaste, {name} is absent today in Murlidhar Academy. Topic missed: {details['topic']}."
                 
-                url = f"https://wa.me/{number}?text={msg}"
-                st.link_button(f"Message {name}", url)
+                # Message Generation
+                if use_custom_msg:
+                    # Custom Message Logic
+                    final_msg = custom_text.replace("{name}", name)
+                else:
+                    # Default Message Logic
+                    if msg_target == "Student":
+                        final_msg = f"Hi {name}, you were absent in {details['subject']} class. Topic: {details['topic']}."
+                    else:
+                        final_msg = f"Namaste, {name} is absent today in Murlidhar Academy. Topic missed: {details['topic']}."
+                
+                # Encode URL for WhatsApp
+                encoded_msg = urllib.parse.quote(final_msg)
+                url = f"https://wa.me/{number}?text={encoded_msg}"
+                
+                st.link_button(f"Message {name} 🟢", url)
         else:
-            st.write("No absent students to message.")
+            st.info("No absent students today. Good job!")
 
 # --- 2. STUDENT ANALYSIS PAGE ---
 elif menu == "Student Analysis":
@@ -195,13 +219,30 @@ elif menu == "Student Analysis":
     students_df, _, _ = load_data()
     all_attendance = pd.DataFrame(worksheet_attendance.get_all_records())
     
-    if all_attendance.empty:
-        st.info("No data yet.")
-    else:
-        if not students_df.empty:
-            s_name = st.selectbox("Select Student", students_df['Name'].unique())
-            student_data = all_attendance[all_attendance['Name'] == s_name]
+    if not students_df.empty:
+        s_name = st.selectbox("Select Student", students_df['Name'].unique())
+        
+        # Get Student Details for Messaging
+        s_details = students_df[students_df['Name'] == s_name].iloc[0]
+        
+        # --- NEW: DIRECT MESSAGE SECTION ---
+        with st.expander("💬 Send WhatsApp Message to this Student"):
+            msg_to = st.radio("To:", ["Student", "Parent"], horizontal=True, key="anl_rad")
+            custom_msg_anl = st.text_area("Message:", value=f"Hi {s_name}, ")
             
+            if msg_to == "Student":
+                num = s_details['Student_Mobile']
+            else:
+                num = s_details['Parent_Mobile']
+                
+            if st.button("Open WhatsApp"):
+                enc_msg = urllib.parse.quote(custom_msg_anl)
+                # Streamlit doesn't support direct open in button callback easily, so we use link
+                st.write(f"Click here: [Open WhatsApp](https://wa.me/{num}?text={enc_msg})")
+
+        # Charts Logic
+        if not all_attendance.empty:
+            student_data = all_attendance[all_attendance['Name'] == s_name]
             if not student_data.empty:
                 total = len(student_data)
                 present = len(student_data[student_data['Status'] == 'Present'])
@@ -214,7 +255,9 @@ elif menu == "Student Analysis":
                              title=f"Attendance: {s_name}", color_discrete_sequence=['green', 'red'])
                 st.plotly_chart(fig)
             else:
-                st.warning("No records found.")
+                st.warning("No attendance records found.")
+    else:
+        st.info("No students found.")
 
 # --- 3. MANAGE STUDENTS & BATCHES ---
 elif menu == "Manage Students (Admin)":
@@ -238,7 +281,7 @@ elif menu == "Manage Students (Admin)":
                     st.error("⚠️ ID already exists!")
                 else:
                     worksheet_students.append_row([int(new_id), new_name, new_batch, s_mobile, p_mobile])
-                    st.success(f"✅ {new_name} added to {new_batch}!")
+                    st.success(f"✅ {new_name} added!")
                     st.rerun()
 
     with tab2:
